@@ -55,7 +55,7 @@ static void sensor_task(void *arg)
     // Edellisiä ja suodatettuja kiihtyvyysarvoja käytetään liikkeen havaitsemiseen.
     float previous_ax, previous_ay;
     float filtered_ax, filtered_ay;
-    float filtered_gy;
+    float previous_gy, filtered_gy;
 
     const float accelerometer_threshold = 0.2f;
     const float accelerometer_alpha = 0.4f;
@@ -74,9 +74,8 @@ static void sensor_task(void *arg)
     TickType_t last_wake = xTaskGetTickCount();
 
     // Ensimmäinen näyte alustaa vertailu- ja suodatusarvot.
-    float initial_gy;
     if (ICM42670_read_sensor_data(&previous_ax, &previous_ay, NULL,
-                                  NULL, &initial_gy, NULL, NULL) != 0)
+                                  NULL, &previous_gy, NULL, NULL) != 0)
     {
         printf("Failed to read initial ICM42670 data\n");
         vTaskDelete(NULL);
@@ -85,7 +84,7 @@ static void sensor_task(void *arg)
 
     filtered_ax = previous_ax;
     filtered_ay = previous_ay;
-    filtered_gy = initial_gy;
+    filtered_gy = previous_gy;
 
     while (1)
     {
@@ -106,10 +105,10 @@ static void sensor_task(void *arg)
             }
 
             // Suodatus vähentää mittauskohinaa ennen liikkeen tunnistamista.
-            filtered_gy = gyroscope_alpha * current_gy + (1 - gyroscope_alpha) * filtered_gy;
+            filtered_gy = gyroscope_alpha * current_gy + (1 - gyroscope_alpha) * previous_gy;
             float rotation_speed = fabs(filtered_gy);
-            filtered_ax = accelerometer_alpha * current_ax + (1 - accelerometer_alpha) * filtered_ax;
-            filtered_ay = accelerometer_alpha * current_ay + (1 - accelerometer_alpha) * filtered_ay;
+            filtered_ax = accelerometer_alpha * current_ax + (1 - accelerometer_alpha) * previous_ax;
+            filtered_ay = accelerometer_alpha * current_ay + (1 - accelerometer_alpha) * previous_ay;
 
             float delta_ax = fabs(filtered_ax - previous_ax);
             float delta_ay = fabs(filtered_ay - previous_ay);
@@ -155,6 +154,7 @@ static void sensor_task(void *arg)
             // Käytetään suodatettua näytettä seuraavan kierroksen vertailuarvona.
             previous_ax = filtered_ax;
             previous_ay = filtered_ay;
+            previous_gy = filtered_gy;
         }
         else if (programState == SENDING)
         {
@@ -170,11 +170,11 @@ static void sensor_task(void *arg)
             }
 
             // Päivitetään suodatetut arvot ja lasketaan liikkeen voimakkuus.
-            filtered_ax = accelerometer_alpha * current_ax + (1 - accelerometer_alpha) * filtered_ax;
-            filtered_ay = accelerometer_alpha * current_ay + (1 - accelerometer_alpha) * filtered_ay;
+            filtered_ax = accelerometer_alpha * current_ax + (1 - accelerometer_alpha) * previous_ax;
+            filtered_ay = accelerometer_alpha * current_ay + (1 - accelerometer_alpha) * previous_ay;
             float delta_ax = fabs(filtered_ax - previous_ax);
             float delta_ay = fabs(filtered_ay - previous_ay);
-            filtered_gy = gyroscope_alpha * current_gy + (1 - gyroscope_alpha) * filtered_gy;
+            filtered_gy = gyroscope_alpha * current_gy + (1 - gyroscope_alpha) * previous_gy;
             float rotation_speed = fabs(filtered_gy);
 
             // Lähetetään merkki vasta, kun laite on ollut rauhallinen viisi näytettä.
@@ -200,6 +200,7 @@ static void sensor_task(void *arg)
             }
             previous_ax = filtered_ax;
             previous_ay = filtered_ay;
+            previous_gy = filtered_gy;
         }
 
         xSemaphoreGive(stateMutex);
