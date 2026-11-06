@@ -37,123 +37,175 @@ static void sensor_task(void *arg)
 {
     (void)arg;
 
-    // IMU:n tunnistus ja perusasetusten määrittely tehdään sensoritehtävässä,
-    // koska sensoridataa käytetään tässä tehtävässä koko ohjelman ajan.
+    // Alustetaan IMU ja otetaan kiihtyvyysanturi sekä gyroskooppi käyttöön.
     if (init_ICM42670() != 0)
     {
         printf("Failed to initialize ICM42670\n");
-        vTaskDelete(NULL); // Poistetaan tehtävä, koska anturin alustaminen epäonnistui.
+        vTaskDelete(NULL);
         return;
     }
 
-    // Käynnistää kiihtyvyysanturin ja gyroskoopin SDK:n oletusasetuksilla.
     if (ICM42670_start_with_default_values() != 0)
     {
         printf("Failed to start ICM42670\n");
-        vTaskDelete(NULL); // Poistetaan tehtävä, koska anturin käynnistäminen epäonnistui.
+        vTaskDelete(NULL);
         return;
     }
 
+    // Edellisiä ja suodatettuja kiihtyvyysarvoja käytetään liikkeen havaitsemiseen.
     float previous_ax, previous_ay;
+    float filtered_ax, filtered_ay;
+    float filtered_gy;
 
-    // Kynnysarvo on g-yksiköissä. Sitä suurempi näytteiden välinen muutos
-    // tulkitaan liikkeeksi.
-    const float threshold = 0.3f;
+    const float accelerometer_threshold = 0.2f;
+    const float accelerometer_alpha = 0.4f;
+    const float gyroscope_threshold = 100.0f;
+    const float gyroscope_alpha = 0.4f;
 
-    // is_moving estää saman jatkuvan liikkeen tulkitsemisen useaksi merkiksi.
-    bool is_moving = false;
-
-    // Y-akselin liike tuottaa pisteen ja X-akselin liike viivan.
+    // Y-akselin liike tuottaa pisteen, X-akselin liike viivan
+    // ja riittävän voimakas Y-akselin pyöräytys välilyönnin.
     char detection_symbol;
 
-    // Liikkeen pitää olla poissa usean näytteen ajan ennen uuden liikkeen
-    // hyväksymistä. Tämä vähentää mittauskohinan aiheuttamia vääriä tunnistuksia.
+    // Liikkeen on oltava rauhallinen usean näytteen ajan ennen merkin lähettämistä.
     uint8_t debounce_counter = 0;
+    uint8_t rotation_counter = 0;
 
-    // Ensimmäinen näyte toimii vertailukohtana seuraavalle mittaukselle.
-    if (ICM42670_read_sensor_data(&previous_ax, &previous_ay, NULL, NULL, NULL, NULL, NULL) != 0)
+    // Säilyttää tasaisen 50 ms näytteenottovälin.
+    TickType_t last_wake = xTaskGetTickCount();
+
+    // Ensimmäinen näyte alustaa vertailu- ja suodatusarvot.
+    float initial_gy;
+    if (ICM42670_read_sensor_data(&previous_ax, &previous_ay, NULL,
+                                  NULL, &initial_gy, NULL, NULL) != 0)
     {
         printf("Failed to read initial ICM42670 data\n");
-        vTaskDelete(NULL); // Poistetaan tehtävä, koska anturin lukeminen epäonnistui.
+        vTaskDelete(NULL);
         return;
     }
+
+    filtered_ax = previous_ax;
+    filtered_ay = previous_ay;
+    filtered_gy = initial_gy;
 
     while (1)
     {
-        // Pidetään tila lukittuna sensorin lukemisen ja mahdollisen
-        // tilamuutoksen ajan.
+        // Suojataan tilan luku ja muutos muilta tehtäviltä.
         xSemaphoreTake(stateMutex, portMAX_DELAY);
+
         if (programState == IDLE)
         {
             float current_ax, current_ay;
-            // Sensorin näytteet luetaan 50 millisekunnin välein.
-            if (ICM42670_read_sensor_data(&current_ax, &current_ay, NULL, NULL, NULL, NULL, NULL) != 0)
+            float current_gy;
+
+            if (ICM42670_read_sensor_data(&current_ax, &current_ay, NULL, NULL, &current_gy, NULL, NULL) != 0)
             {
                 printf("Failed to read ICM42670 data\n");
                 xSemaphoreGive(stateMutex);
-                vTaskDelay(pdMS_TO_TICKS(50));
+                vTaskDelayUntil(&last_wake, pdMS_TO_TICKS(50));
                 continue;
             }
 
-            // Peräkkäisten näytteiden erotus kuvaa havaittua liikettä.
-            float delta_ax = fabs(current_ax - previous_ax);
-            float delta_ay = fabs(current_ay - previous_ay);
+            // Suodatus vähentää mittauskohinaa ennen liikkeen tunnistamista.
+            filtered_gy = gyroscope_alpha * current_gy + (1 - gyroscope_alpha) * filtered_gy;
+            float rotation_speed = fabs(filtered_gy);
+            filtered_ax = accelerometer_alpha * current_ax + (1 - accelerometer_alpha) * filtered_ax;
+            filtered_ay = accelerometer_alpha * current_ay + (1 - accelerometer_alpha) * filtered_ay;
 
-            // Liikkeen tunnistuksen debug-tulostus.
-            // printf("Current ax: %f, Current ay: %f\n", current_ax, current_ay);
-            // printf("Delta ax: %f, Delta ay: %f\n", delta_ax, delta_ay);
+            float delta_ax = fabs(filtered_ax - previous_ax);
+            float delta_ay = fabs(filtered_ay - previous_ay);
 
-            if (!is_moving)
+            // Tunnistetaan pyöräytys ennen pisteen tai viivan tunnistamista.
+            if (rotation_speed > gyroscope_threshold)
             {
-                // Liikkeen alkaessa muodostetaan yksi merkki ja asetetaan
-                // tila aktiiviseksi, jotta samaa liikettä ei tunnisteta uudelleen.
-                if (delta_ay > threshold)
+                rotation_counter++;
+
+                if (rotation_counter >= 3)
                 {
-                    is_moving = true;
-                    detection_symbol = '.';
+                    programState = SENDING;
+                    detection_symbol = ' ';
 
-                    // Symbolin tunnistuksen debug-tulostus.
-                    // printf("Movement detected: %c\n", detection_symbol);
+                    printf("Movement detected: '%c'\n", detection_symbol);
 
-                    debounce_counter = 0;
+                    rotation_counter = 0;
                 }
-                else if (delta_ax > threshold)
+            }
+            else if (delta_ay > accelerometer_threshold && delta_ay > delta_ax)
+            {
+                programState = SENDING;
+                detection_symbol = '.';
+
+                printf("Movement detected: '%c'\n", detection_symbol);
+
+                debounce_counter = 0;
+            }
+            else if (delta_ax > accelerometer_threshold)
+            {
+                programState = SENDING;
+                detection_symbol = '-';
+
+                printf("Movement detected: '%c'\n", detection_symbol);
+
+                debounce_counter = 0;
+            }
+            else
+            {
+                rotation_counter = 0;
+            }
+
+            // Käytetään suodatettua näytettä seuraavan kierroksen vertailuarvona.
+            previous_ax = filtered_ax;
+            previous_ay = filtered_ay;
+        }
+        else if (programState == SENDING)
+        {
+            float current_ax, current_ay;
+            float current_gy;
+
+            if (ICM42670_read_sensor_data(&current_ax, &current_ay, NULL, NULL, &current_gy, NULL, NULL) != 0)
+            {
+                printf("Failed to read ICM42670 data\n");
+                xSemaphoreGive(stateMutex);
+                vTaskDelayUntil(&last_wake, pdMS_TO_TICKS(50));
+                continue;
+            }
+
+            // Päivitetään suodatetut arvot ja lasketaan liikkeen voimakkuus.
+            filtered_ax = accelerometer_alpha * current_ax + (1 - accelerometer_alpha) * filtered_ax;
+            filtered_ay = accelerometer_alpha * current_ay + (1 - accelerometer_alpha) * filtered_ay;
+            float delta_ax = fabs(filtered_ax - previous_ax);
+            float delta_ay = fabs(filtered_ay - previous_ay);
+            filtered_gy = gyroscope_alpha * current_gy + (1 - gyroscope_alpha) * filtered_gy;
+            float rotation_speed = fabs(filtered_gy);
+
+            // Lähetetään merkki vasta, kun laite on ollut rauhallinen viisi näytettä.
+            if (delta_ax < accelerometer_threshold && delta_ay < accelerometer_threshold && rotation_speed < gyroscope_threshold)
+            {
+                debounce_counter++;
+                if (debounce_counter >= 5)
                 {
-                    is_moving = true;
-                    detection_symbol = '-';
-
-                    // Symbolin tunnistuksen debug-tulostus.
-                    // printf("Movement detected: %c\n", detection_symbol);
-
-                    debounce_counter = 0;
+                    if (xQueueSend(txQueue, &detection_symbol, 0) == pdPASS)
+                    {
+                        programState = IDLE;
+                        debounce_counter = 0;
+                    }
+                    else
+                    {
+                        printf("Failed to send symbol to txQueue\n");
+                    }
                 }
             }
             else
             {
-                // Liike kuitataan vasta viiden peräkkäisen rauhallisen näytteen
-                // jälkeen. Näytteenottovälillä 50 ms tämä vastaa noin 250 ms:ia.
-                if (delta_ax < threshold && delta_ay < threshold)
-                {
-                    debounce_counter++;
-                    if (debounce_counter >= 5)
-                    {
-                        is_moving = false;
-                        debounce_counter = 0;
-                    }
-                }
-                else
-                {
-                    debounce_counter = 0;
-                }
+                debounce_counter = 0;
             }
-            // Nykyinen näyte on seuraavan kierroksen vertailuarvo.
-            previous_ax = current_ax;
-            previous_ay = current_ay;
+            previous_ax = filtered_ax;
+            previous_ay = filtered_ay;
         }
+
         xSemaphoreGive(stateMutex);
-        // Viive vapauttaa suorittimen ja määrittää näytteenottotaajuudeksi
-        // noin 20 mittausta sekunnissa.
-        vTaskDelay(pdMS_TO_TICKS(50));
+
+        // Odotetaan seuraavaan näytteenottohetkeen.
+        vTaskDelayUntil(&last_wake, pdMS_TO_TICKS(50));
     }
 }
 
