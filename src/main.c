@@ -73,7 +73,7 @@ void ui_task(void *pvParameters) {
     // Alustetaan näyttö, summeri ja ledi sekä tyhjennetään viestipuskuri roskadatasta
     init_display();
     init_buzzer();
-    init_led();    
+    init_led();
     msg_buffer[0] = '\0';
 
     while (1) {
@@ -93,9 +93,29 @@ void ui_task(void *pvParameters) {
                 buzzer_play_tone(kuittausmelodia[i].frequency, kuittausmelodia[i].length - 20);
                 vTaskDelay(pdMS_TO_TICKS(20));
             }
-        }
 
-        else if (character == '\n') {            
+            // Muutetaan tila IDLE:ksi
+            if (xSemaphoreTake(stateMutex, portMAX_DELAY) == pdTRUE) {
+                programState = IDLE;
+                current_state = IDLE; // Päivitetään paikallinen kopio
+                xSemaphoreGive(stateMutex);
+            }
+
+            // Päivitetään näyttö
+            clear_display();
+            write_text_xy(0, 0, get_state_string(current_state));
+            write_text_xy(0, 16, msg_buffer);
+        }
+        
+        // Lopetusmerkki
+        else if (character == '\n') {
+            // Muutetaan tila PLAY_BACK:ksi toiston ajaksi
+            if (xSemaphoreTake(stateMutex, 10) == pdTRUE) {
+                programState = PLAY_BACK;
+                current_state = PLAY_BACK;
+                xSemaphoreGive(stateMutex);
+            }
+            
             // Lisätään * viestin päättymisen merkiksi, jos puskurissa on tilaa
             if (index < 62) {
                 msg_buffer[index] = '*';
@@ -105,37 +125,57 @@ void ui_task(void *pvParameters) {
             // Päivitetään näyttö
             clear_display();
             write_text_xy(0, 0, get_state_string(current_state));
-            write_text_xy(0, 16, msg_buffer);       
+            write_text_xy(0, 16, msg_buffer);
 
-            msg_ended = true;            
+            // Toistetaan vastaanotettu viesti ledillä ja summerilla.
+            for (int i = 0; i < index; i++) {
+                char c = msg_buffer[i];
+                
+                // Piste
+                if (c == '.') {
+                    set_led_status(true);
+                    buzzer_play_tone(641, 100);
+                    set_led_status(false);
+                    vTaskDelay(pdMS_TO_TICKS(100));
+                }
+
+                // Viiva
+                else if (c == '-') {
+                    set_led_status(true);
+                    buzzer_play_tone(641, 300);
+                    set_led_status(false);
+                    vTaskDelay(pdMS_TO_TICKS(100));
+                }
+
+                // Välilyönti
+                else if (c == ' ') {
+                    vTaskDelay(pdMS_TO_TICKS(300));
+                }
+            }
+            
+            // Muutetaan tila takaisin IDLE:ksi
+            if (xSemaphoreTake(stateMutex, portMAX_DELAY) == pdTRUE) {
+                programState = IDLE;
+                current_state = IDLE;
+                xSemaphoreGive(stateMutex);
+            }
+            
+            // Nollataan puskuri ja indeksi
+            msg_buffer[0] = '\0';
+            index = 0;
         }
 
         else {
-            // Piste
-            if (character == '.') {
-                set_led_status(true);
-                buzzer_play_tone(641, 100);
-                set_led_status(false);
-
-                vTaskDelay(pdMS_TO_TICKS(50));
+            // Muutetaan tila RECEIVING:ksi, jos se ei vielä ole.
+            // Ilman if-lausetta tämä yrittäisi muuttaa tilaa jokaisella kierroksella.
+            if (current_state != RECEIVING) {
+                if (xSemaphoreTake(stateMutex, 10) == pdTRUE) {
+                    programState = RECEIVING;
+                    current_state = RECEIVING;
+                    xSemaphoreGive(stateMutex);
+                }
             }
-
-            // Viiva
-            else if (character == '-') {
-                set_led_status(true);
-                buzzer_play_tone(641, 300);
-                set_led_status(false);
-
-                vTaskDelay(pdMS_TO_TICKS(50));
-            }
-
-            // Viestin päätyttyä nollataan puskuri ja indeksi
-            if (msg_ended) {
-                msg_buffer[0] = '\0';
-                index = 0;
-                msg_ended = false;
-            }
-
+            
             // Lisätään merkki puskuriin ja lisätään nollatavu perään
             msg_buffer[index] = character;
             msg_buffer[index + 1] = '\0';
