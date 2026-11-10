@@ -26,12 +26,131 @@ enum state
 
 enum state programState = IDLE;
 
+typedef struct {
+    uint32_t frequency;
+    uint32_t length; // millisekuntia
+} Note;
+
+// Super Mario 1-Up -ääni
+const Note kuittausmelodia[] = {
+    {659, 133},  // E5
+    {784, 133},  // G5
+    {1319, 133}, // E6
+    {1046, 133}, // C6
+    {1175, 133}, // D6
+    {1568, 133}  // G6
+};
+
 // Nämä jonot varataan tulevaa lähetystä ja vastaanottoa varten.
 QueueHandle_t txQueue;
 QueueHandle_t rxQueue;
 
 // Suojaa programState-muuttujan samanaikaisen käytön FreeRTOS-tehtävissä.
 SemaphoreHandle_t stateMutex;
+
+// Funktio, jolla saadaan tämänhetkinen tila merkkijonona.
+const char* get_state_string(enum state s) {
+    switch (s) {
+        case IDLE:       return "IDLE";
+        case SENDING:    return "SENDING";
+        case RECEIVING:  return "RECEIVING";
+        case PLAY_BACK:  return "PLAYBACK";
+    }
+    return "UNKNOWN";
+}
+
+void ui_task(void *pvParameters) {
+    char character;
+    char msg_buffer[64];    
+    uint8_t index = 0;
+    bool msg_ended = false;
+
+    int len_kuittausmelodia = sizeof(kuittausmelodia) / sizeof(kuittausmelodia[0]);
+
+    // Oma muuttuja tilan tallentamiseen turvallisesti
+    enum state current_state = IDLE;
+
+    // Alustetaan näyttö, summeri ja ledi sekä tyhjennetään viestipuskuri roskadatasta
+    init_display();
+    init_buzzer();
+    init_led();    
+    msg_buffer[0] = '\0';
+
+    while (1) {
+        xQueueReceive(rxQueue, &character, portMAX_DELAY);
+
+        // Lukitaan tila kymmenen tikin ajaksi, kun luetaan tila. 
+        // Jos epäonnistuu, current_state pysyy samana kuin aikaisemmin.
+        if (xSemaphoreTake(stateMutex, 10) == pdTRUE) {
+            current_state = programState;
+            xSemaphoreGive(stateMutex);
+        }
+        
+        // Lähetetään summerilla melodia, kun jonoon saapuu oman lähetyksen lopetusmerkki
+        if (character == 0x04) {
+            // Käydään läpi kuittausmelodian kaikki nuotit
+            for (int i = 0; i < len_kuittausmelodia; i++) {
+                buzzer_play_tone(kuittausmelodia[i].frequency, kuittausmelodia[i].length - 20);
+                vTaskDelay(pdMS_TO_TICKS(20));
+            }
+        }
+
+        else if (character == '\n') {            
+            // Lisätään * viestin päättymisen merkiksi, jos puskurissa on tilaa
+            if (index < 62) {
+                msg_buffer[index] = '*';
+                msg_buffer[index + 1] = '\0';
+            }
+            
+            // Päivitetään näyttö
+            clear_display();
+            write_text_xy(0, 0, get_state_string(current_state));
+            write_text_xy(0, 16, msg_buffer);       
+
+            msg_ended = true;            
+        }
+
+        else {
+            // Piste
+            if (character == '.') {
+                set_led_status(true);
+                buzzer_play_tone(641, 100);
+                set_led_status(false);
+
+                vTaskDelay(pdMS_TO_TICKS(50));
+            }
+
+            // Viiva
+            else if (character == '-') {
+                set_led_status(true);
+                buzzer_play_tone(641, 300);
+                set_led_status(false);
+
+                vTaskDelay(pdMS_TO_TICKS(50));
+            }
+
+            // Viestin päätyttyä nollataan puskuri ja indeksi
+            if (msg_ended) {
+                msg_buffer[0] = '\0';
+                index = 0;
+                msg_ended = false;
+            }
+
+            // Lisätään merkki puskuriin ja lisätään nollatavu perään
+            msg_buffer[index] = character;
+            msg_buffer[index + 1] = '\0';
+
+            // Nostetaan indeksiä, mutta varmistetaan ettei tule ylivuotoa
+            if (index >= 62) index = 0;
+            else index++;
+            
+            // Päivitetään näyttö
+            clear_display();
+            write_text_xy(0, 0, get_state_string(current_state));
+            write_text_xy(0, 16, msg_buffer);
+        }
+    }
+}
 
 static void sensor_task(void *arg)
 {
@@ -105,7 +224,7 @@ static void sensor_task(void *arg)
 
             if (!is_moving)
             {
-                // Liikkeen alkaessa muodostetaan yksi merkki ja asetetaan
+                // Liikkeen alkaessa muodostetaan yksi character ja asetetaan
                 // tila aktiiviseksi, jotta samaa liikettä ei tunnisteta uudelleen.
                 if (delta_ay > threshold)
                 {
