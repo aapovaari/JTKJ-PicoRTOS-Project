@@ -63,7 +63,6 @@ void ui_task(void *pvParameters) {
     char character;
     char msg_buffer[64];    
     uint8_t index = 0;
-    bool msg_ended = false;
 
     int len_kuittausmelodia = sizeof(kuittausmelodia) / sizeof(kuittausmelodia[0]);
 
@@ -159,6 +158,11 @@ void ui_task(void *pvParameters) {
                 current_state = IDLE;
                 xSemaphoreGive(stateMutex);
             }
+
+            // Päivitetään näyttö, mutta jätetään vanha viesti näkyviin
+            clear_display();
+            write_text_xy(0, 0, get_state_string(current_state));
+            write_text_xy(0, 16, msg_buffer);
             
             // Nollataan puskuri ja indeksi
             msg_buffer[0] = '\0';
