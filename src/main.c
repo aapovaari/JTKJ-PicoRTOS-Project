@@ -36,11 +36,11 @@ enum state programState = IDLE;
 char debugBuffer[DEBUG_MSG_LENGTH];
 
 char rxBuffer[MAX_MSG_LENGTH];
-// char txBuffer[MAX_MSG_LENGTH];
-// int msgIndex = 0;
+char txBuffer[MAX_MSG_LENGTH];
+int msgIndex = 0;
 
-char txBuffer[MAX_MSG_LENGTH] = "Testi Viesti\n\0";
-int msgIndex = 14;
+// char txBuffer[MAX_MSG_LENGTH] = "Testi Viesti\n\0";
+// int msgIndex = 14;
 typedef struct
 {
     uint32_t frequency;
@@ -63,6 +63,28 @@ QueueHandle_t rxQueue;
 
 // Suojaa programState-muuttujan samanaikaisen käytön FreeRTOS-tehtävissä.
 SemaphoreHandle_t stateMutex;
+
+void test_sending_char_to_queue_task(void *pvParameters)
+{
+    (void)pvParameters;
+
+    const char test_message[] = ".- \n";
+
+    for (size_t i = 0; i < sizeof(test_message) - 1; i++)
+    {
+        char character = test_message[i];
+
+        if (xQueueSend(rxQueue, &character, portMAX_DELAY) != pdPASS)
+        {
+            usb_serial_print((char const *)"Failed to send character to rxQueue\n\0");
+            usb_serial_flush();
+        }
+
+        vTaskDelay(pdMS_TO_TICKS(1000));
+    }
+
+    vTaskDelete(NULL);
+}
 
 // Funktio, jolla saadaan tämänhetkinen tila merkkijonona.
 const char *get_state_string(enum state s)
@@ -97,6 +119,7 @@ void ui_task(void *pvParameters)
     clear_display();
     write_text_xy(0, 0, get_state_string(current_state));
 
+    clear_display();
     while (1)
     {
         vTaskDelay(pdMS_TO_TICKS(50));
@@ -104,7 +127,7 @@ void ui_task(void *pvParameters)
         xSemaphoreTake(stateMutex, portMAX_DELAY);
         current_state = programState;
         xSemaphoreGive(stateMutex);
-        
+
         if (current_state != previous_state)
         {
             // Päivitetään näyttö
@@ -112,43 +135,43 @@ void ui_task(void *pvParameters)
             write_text_xy(0, 0, get_state_string(current_state));
             write_text_xy(0, 14, rxBuffer);
 
-            if (current_state == PLAY_BACK) 
+            if (current_state == PLAY_BACK)
             {
                 // Toistetaan vastaanotettu viesti ledillä ja summerilla.
-               for (int i = 0; i < sizeof(rxBuffer) / sizeof(rxBuffer[0]); i++)
-               {
-                   char c = rxBuffer[i];
-                   
-                   // Lopetetaan toisto, jos tulee tyhjä merkki vastaan
-                   if (c == '\0')
-                   {
-                    break;
-                   }
-                
-                   // Piste
-                   if (c == '.')
-                   {
-                       set_led_status(true);
-                       buzzer_play_tone(641, 100);
-                       set_led_status(false);
-                       vTaskDelay(pdMS_TO_TICKS(100));
-                   }
-                
-                   // Viiva
-                   else if (c == '-')
-                   {
-                       set_led_status(true);
-                       buzzer_play_tone(641, 300);
-                       set_led_status(false);
-                       vTaskDelay(pdMS_TO_TICKS(100));
-                   }
-                
-                   // Välilyönti
-                   else if (c == ' ')
-                   {
-                       vTaskDelay(pdMS_TO_TICKS(300));
-                   }
-               }
+                for (int i = 0; i < sizeof(rxBuffer) / sizeof(rxBuffer[0]); i++)
+                {
+                    char c = rxBuffer[i];
+
+                    // Lopetetaan toisto, jos tulee tyhjä merkki vastaan
+                    if (c == '\0')
+                    {
+                        break;
+                    }
+
+                    // Piste
+                    if (c == '.')
+                    {
+                        set_led_status(true);
+                        buzzer_play_tone(641, 100);
+                        set_led_status(false);
+                        vTaskDelay(pdMS_TO_TICKS(100));
+                    }
+
+                    // Viiva
+                    else if (c == '-')
+                    {
+                        set_led_status(true);
+                        buzzer_play_tone(641, 300);
+                        set_led_status(false);
+                        vTaskDelay(pdMS_TO_TICKS(100));
+                    }
+
+                    // Välilyönti
+                    else if (c == ' ')
+                    {
+                        vTaskDelay(pdMS_TO_TICKS(300));
+                    }
+                }
 
                 // Palautetaan tila IDLE:ksi
                 xSemaphoreTake(stateMutex, portMAX_DELAY);
@@ -158,7 +181,7 @@ void ui_task(void *pvParameters)
 
             else if (current_state == SUCCESS)
             {
-                    // Käydään läpi kuittausmelodian kaikki nuotit
+                // Käydään läpi kuittausmelodian kaikki nuotit
                 for (int i = 0; i < len_kuittausmelodia; i++)
                 {
                     buzzer_play_tone(kuittausmelodia[i].frequency, kuittausmelodia[i].length - 20);
@@ -177,7 +200,7 @@ void ui_task(void *pvParameters)
                 clear_display();
                 write_text_xy(0, 0, get_state_string(current_state));
                 write_text_xy(0, 16, msg_buffer);
-            } 
+            }
             previous_state = current_state;
         }
     }
@@ -209,7 +232,6 @@ static void sensor_task(void *arg)
     float filtered_ax, filtered_ay;
     float previous_gy, filtered_gy;
 
-    // Määritetään liikkeen tunnistamisen kynnysarvot ja suodatusparametrit.
     const float accelerometer_threshold = 0.2f;
     const float accelerometer_alpha = 0.4f;
     const float gyroscope_threshold = 100.0f;
@@ -236,6 +258,10 @@ static void sensor_task(void *arg)
         return;
     }
 
+    filtered_ax = previous_ax;
+    filtered_ay = previous_ay;
+    filtered_gy = previous_gy;
+
     while (1)
     {
         // Suojataan tilan luku ja muutos muilta tehtäviltä.
@@ -256,6 +282,78 @@ static void sensor_task(void *arg)
             }
 
             // Suodatus vähentää mittauskohinaa ennen liikkeen tunnistamista.
+            filtered_gy = gyroscope_alpha * current_gy + (1 - gyroscope_alpha) * previous_gy;
+            float rotation_speed = fabs(filtered_gy);
+            filtered_ax = accelerometer_alpha * current_ax + (1 - accelerometer_alpha) * previous_ax;
+            filtered_ay = accelerometer_alpha * current_ay + (1 - accelerometer_alpha) * previous_ay;
+
+            float delta_ax = fabs(filtered_ax - previous_ax);
+            float delta_ay = fabs(filtered_ay - previous_ay);
+
+            // Tunnistetaan pyöräytys ennen pisteen tai viivan tunnistamista.
+            if (rotation_speed > gyroscope_threshold)
+            {
+                rotation_counter++;
+
+                if (rotation_counter >= 3)
+                {
+                    programState = SENDING;
+                    detection_symbol = ' ';
+
+                    snprintf(debugBuffer, DEBUG_MSG_LENGTH, "Movement detected: '%c'\n", detection_symbol);
+                    usb_serial_print(debugBuffer);
+                    usb_serial_flush();
+
+                    rotation_counter = 0;
+                }
+            }
+            else if (delta_ay > accelerometer_threshold && delta_ay > delta_ax)
+            {
+                programState = SENDING;
+                detection_symbol = '.';
+
+                snprintf(debugBuffer, DEBUG_MSG_LENGTH, "Movement detected: '%c'\n", detection_symbol);
+                usb_serial_print(debugBuffer);
+                usb_serial_flush();
+
+                debounce_counter = 0;
+            }
+            else if (delta_ax > accelerometer_threshold)
+            {
+                programState = SENDING;
+                detection_symbol = '-';
+
+                snprintf(debugBuffer, DEBUG_MSG_LENGTH, "Movement detected: '%c'\n", detection_symbol);
+                usb_serial_print(debugBuffer);
+                usb_serial_flush();
+
+                debounce_counter = 0;
+            }
+            else
+            {
+                rotation_counter = 0;
+            }
+
+            // Käytetään suodatettua näytettä seuraavan kierroksen vertailuarvona.
+            previous_ax = filtered_ax;
+            previous_ay = filtered_ay;
+            previous_gy = filtered_gy;
+        }
+        else if (programState == SENDING)
+        {
+            float current_ax, current_ay;
+            float current_gy;
+
+            if (ICM42670_read_sensor_data(&current_ax, &current_ay, NULL, NULL, &current_gy, NULL, NULL) != 0)
+            {
+                usb_serial_print((char const *)"Failed to read ICM42670 data\n\0");
+                usb_serial_flush();
+                xSemaphoreGive(stateMutex);
+                vTaskDelayUntil(&last_wake, pdMS_TO_TICKS(50));
+                continue;
+            }
+
+            // Päivitetään suodatetut arvot ja lasketaan liikkeen voimakkuus.
             filtered_ax = accelerometer_alpha * current_ax + (1 - accelerometer_alpha) * previous_ax;
             filtered_ay = accelerometer_alpha * current_ay + (1 - accelerometer_alpha) * previous_ay;
             float delta_ax = fabs(filtered_ax - previous_ax);
@@ -264,119 +362,37 @@ static void sensor_task(void *arg)
             filtered_gy = gyroscope_alpha * current_gy + (1 - gyroscope_alpha) * previous_gy;
             float rotation_speed = fabs(filtered_gy);
 
-            // Tunnistetaan pyöräytys ennen pisteen tai viivan tunnistamista.
-            if (rotation_speed > gyroscope_threshold)
+            // Lähetetään merkki vasta, kun laite on ollut rauhallinen viisi näytettä.
+            if (delta_ax < accelerometer_threshold && delta_ay < accelerometer_threshold && rotation_speed < gyroscope_threshold)
             {
-                rotation_counter++;
-                if (!is_moving)
+                debounce_counter++;
+                if (debounce_counter >= 5)
                 {
-                    // Liikkeen alkaessa muodostetaan yksi character ja asetetaan
-                    // tila aktiiviseksi, jotta samaa liikettä ei tunnisteta uudelleen.
-                    if (delta_ay > threshold)
+                    if (xQueueSend(txQueue, &detection_symbol, 0) == pdPASS)
                     {
-                        is_moving = true;
-                        detection_symbol = '.';
-
-                        if (rotation_counter >= 3)
-                        {
-                            programState = SENDING;
-                            detection_symbol = ' ';
-
-                            snprintf(debugBuffer, DEBUG_MSG_LENGTH, "Movement detected: '%c'\n", detection_symbol);
-                            usb_serial_print(debugBuffer);
-                            usb_serial_flush();
-
-                            rotation_counter = 0;
-                        }
-                    }
-                    else if (delta_ay > accelerometer_threshold && delta_ay > delta_ax)
-                    {
-                        programState = SENDING;
-                        detection_symbol = '.';
-
-                        snprintf(debugBuffer, DEBUG_MSG_LENGTH, "Movement detected: '%c'\n", detection_symbol);
-                        usb_serial_print(debugBuffer);
-                        usb_serial_flush();
-
-                        debounce_counter = 0;
-                    }
-                    else if (delta_ax > accelerometer_threshold)
-                    {
-                        programState = SENDING;
-                        detection_symbol = '-';
-
-                        snprintf(debugBuffer, DEBUG_MSG_LENGTH, "Movement detected: '%c'\n", detection_symbol);
-                        usb_serial_print(debugBuffer);
-                        usb_serial_flush();
-
+                        programState = IDLE;
                         debounce_counter = 0;
                     }
                     else
                     {
-                        rotation_counter = 0;
-                    }
-
-                    // Käytetään suodatettua näytettä seuraavan kierroksen vertailuarvona.
-                    previous_ax = filtered_ax;
-                    previous_ay = filtered_ay;
-                    previous_gy = filtered_gy;
-                }
-                else if (programState == SENDING)
-                {
-                    float current_ax, current_ay;
-                    float current_gy;
-
-                    if (ICM42670_read_sensor_data(&current_ax, &current_ay, NULL, NULL, &current_gy, NULL, NULL) != 0)
-                    {
-                        usb_serial_print((char const *)"Failed to read ICM42670 data\n\0");
+                        usb_serial_print((char const *)"Failed to send symbol to txQueue\n\0");
                         usb_serial_flush();
-                        xSemaphoreGive(stateMutex);
-                        vTaskDelayUntil(&last_wake, pdMS_TO_TICKS(50));
-                        continue;
                     }
-
-                    // Päivitetään suodatetut arvot ja lasketaan liikkeen voimakkuus.
-                    filtered_ax = accelerometer_alpha * current_ax + (1 - accelerometer_alpha) * previous_ax;
-                    filtered_ay = accelerometer_alpha * current_ay + (1 - accelerometer_alpha) * previous_ay;
-                    float delta_ax = fabs(filtered_ax - previous_ax);
-                    float delta_ay = fabs(filtered_ay - previous_ay);
-
-                    filtered_gy = gyroscope_alpha * current_gy + (1 - gyroscope_alpha) * previous_gy;
-                    float rotation_speed = fabs(filtered_gy);
-
-                    // Lähetetään merkki vasta, kun laite on ollut rauhallinen viisi näytettä.
-                    if (delta_ax < accelerometer_threshold && delta_ay < accelerometer_threshold && rotation_speed < gyroscope_threshold)
-                    {
-                        debounce_counter++;
-                        if (debounce_counter >= 5)
-                        {
-                            if (xQueueSend(txQueue, &detection_symbol, 0) == pdPASS)
-                            {
-                                programState = IDLE;
-                                debounce_counter = 0;
-                            }
-                            else
-                            {
-                                usb_serial_print((char const *)"Failed to send symbol to txQueue\n\0");
-                                usb_serial_flush();
-                            }
-                        }
-                    }
-                    else
-                    {
-                        debounce_counter = 0;
-                    }
-                    previous_ax = filtered_ax;
-                    previous_ay = filtered_ay;
-                    previous_gy = filtered_gy;
                 }
-
-                xSemaphoreGive(stateMutex);
-
-                // Odotetaan seuraavaan näytteenottohetkeen.
-                vTaskDelayUntil(&last_wake, pdMS_TO_TICKS(50));
             }
+            else
+            {
+                debounce_counter = 0;
+            }
+            previous_ax = filtered_ax;
+            previous_ay = filtered_ay;
+            previous_gy = filtered_gy;
         }
+
+        xSemaphoreGive(stateMutex);
+
+        // Odotetaan seuraavaan näytteenottohetkeen.
+        vTaskDelayUntil(&last_wake, pdMS_TO_TICKS(50));
     }
 }
 
