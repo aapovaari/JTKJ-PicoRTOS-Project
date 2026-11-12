@@ -25,10 +25,10 @@ enum state
     IDLE = 1,
     // SENDING on varattu tunnistetun merkin lähettämistä varten.
     SENDING = 2,
-    // RECEIVING on varattu vastaanotettavan datan käsittelyyn.
-    RECEIVING = 3,
     // PLAY_BACK on varattu tallennetun datan toistamiseen.
-    PLAY_BACK = 4
+    PLAY_BACK = 3,
+    // SUCCESS kertoo, kun viesti on lähetetty
+    SUCCESS = 4
 };
 
 enum state programState = IDLE;
@@ -72,167 +72,113 @@ const char *get_state_string(enum state s)
     case IDLE:
         return "IDLE";
     case SENDING:
-        return "SENDING";
-    case RECEIVING:
         return "RECEIVING";
     case PLAY_BACK:
         return "PLAYBACK";
+    case SUCCESS:
+        return "SUCCESS";
     }
     return "UNKNOWN";
 }
 
 void ui_task(void *pvParameters)
 {
-    char character;
-    char msg_buffer[64];
-    uint8_t index = 0;
-
     int len_kuittausmelodia = sizeof(kuittausmelodia) / sizeof(kuittausmelodia[0]);
 
-    // Oma muuttuja tilan tallentamiseen turvallisesti
+    // Omat muuttujat tilojen tallentamiseen turvallisesti
     enum state current_state = IDLE;
+    enum state previous_state = IDLE;
 
     // Alustetaan näyttö, summeri ja ledi sekä tyhjennetään viestipuskuri roskadatasta
     init_display();
     init_buzzer();
     init_led();
-    msg_buffer[0] = '\0';
+
+    clear_display();
+    write_text_xy(0, 0, get_state_string(current_state));
 
     while (1)
     {
-        xQueueReceive(rxQueue, &character, portMAX_DELAY);
+        vTaskDelay(pdMS_TO_TICKS(50));
 
-        // Lukitaan tila kymmenen tikin ajaksi, kun luetaan tila.
-        // Jos epäonnistuu, current_state pysyy samana kuin aikaisemmin.
-        if (xSemaphoreTake(stateMutex, 10) == pdTRUE)
+        xSemaphoreTake(stateMutex, portMAX_DELAY);
+        current_state = programState;
+        xSemaphoreGive(stateMutex);
+        
+        if (current_state != previous_state)
         {
-            current_state = programState;
-            xSemaphoreGive(stateMutex);
-        }
-
-        // Lähetetään summerilla melodia, kun jonoon saapuu oman lähetyksen lopetusmerkki
-        if (character == 0x04)
-        {
-            // Käydään läpi kuittausmelodian kaikki nuotit
-            for (int i = 0; i < len_kuittausmelodia; i++)
-            {
-                buzzer_play_tone(kuittausmelodia[i].frequency, kuittausmelodia[i].length - 20);
-                vTaskDelay(pdMS_TO_TICKS(20));
-            }
-
-            // Muutetaan tila IDLE:ksi
-            if (xSemaphoreTake(stateMutex, portMAX_DELAY) == pdTRUE)
-            {
-                programState = IDLE;
-                current_state = IDLE; // Päivitetään paikallinen kopio
-                xSemaphoreGive(stateMutex);
-            }
-
             // Päivitetään näyttö
             clear_display();
             write_text_xy(0, 0, get_state_string(current_state));
-            write_text_xy(0, 16, msg_buffer);
-        }
+            write_text_xy(0, 14, rxBuffer);
 
-        // Lopetusmerkki
-        else if (character == '\n')
-        {
-            // Muutetaan tila PLAY_BACK:ksi toiston ajaksi
-            if (xSemaphoreTake(stateMutex, 10) == pdTRUE)
+            if (current_state == PLAY_BACK) 
             {
-                programState = PLAY_BACK;
-                current_state = PLAY_BACK;
-                xSemaphoreGive(stateMutex);
-            }
+                // Toistetaan vastaanotettu viesti ledillä ja summerilla.
+               for (int i = 0; i < sizeof(rxBuffer) / sizeof(rxBuffer[0]); i++)
+               {
+                   char c = rxBuffer[i];
+                   
+                   // Lopetetaan toisto, jos tulee tyhjä merkki vastaan
+                   if (c == '\0')
+                   {
+                    break;
+                   }
+                
+                   // Piste
+                   if (c == '.')
+                   {
+                       set_led_status(true);
+                       buzzer_play_tone(641, 100);
+                       set_led_status(false);
+                       vTaskDelay(pdMS_TO_TICKS(100));
+                   }
+                
+                   // Viiva
+                   else if (c == '-')
+                   {
+                       set_led_status(true);
+                       buzzer_play_tone(641, 300);
+                       set_led_status(false);
+                       vTaskDelay(pdMS_TO_TICKS(100));
+                   }
+                
+                   // Välilyönti
+                   else if (c == ' ')
+                   {
+                       vTaskDelay(pdMS_TO_TICKS(300));
+                   }
+               }
 
-            // Lisätään * viestin päättymisen merkiksi, jos puskurissa on tilaa
-            if (index < 62)
-            {
-                msg_buffer[index] = '*';
-                msg_buffer[index + 1] = '\0';
-            }
-
-            // Päivitetään näyttö
-            clear_display();
-            write_text_xy(0, 0, get_state_string(current_state));
-            write_text_xy(0, 16, msg_buffer);
-
-            // Toistetaan vastaanotettu viesti ledillä ja summerilla.
-            for (int i = 0; i < index; i++)
-            {
-                char c = msg_buffer[i];
-
-                // Piste
-                if (c == '.')
-                {
-                    set_led_status(true);
-                    buzzer_play_tone(641, 100);
-                    set_led_status(false);
-                    vTaskDelay(pdMS_TO_TICKS(100));
-                }
-
-                // Viiva
-                else if (c == '-')
-                {
-                    set_led_status(true);
-                    buzzer_play_tone(641, 300);
-                    set_led_status(false);
-                    vTaskDelay(pdMS_TO_TICKS(100));
-                }
-
-                // Välilyönti
-                else if (c == ' ')
-                {
-                    vTaskDelay(pdMS_TO_TICKS(300));
-                }
-            }
-
-            // Muutetaan tila takaisin IDLE:ksi
-            if (xSemaphoreTake(stateMutex, portMAX_DELAY) == pdTRUE)
-            {
+                // Palautetaan tila IDLE:ksi
+                xSemaphoreTake(stateMutex, portMAX_DELAY);
                 programState = IDLE;
-                current_state = IDLE;
                 xSemaphoreGive(stateMutex);
             }
 
-            // Päivitetään näyttö, mutta jätetään vanha viesti näkyviin
-            clear_display();
-            write_text_xy(0, 0, get_state_string(current_state));
-            write_text_xy(0, 16, msg_buffer);
-
-            // Nollataan puskuri ja indeksi
-            msg_buffer[0] = '\0';
-            index = 0;
-        }
-
-        else
-        {
-            // Muutetaan tila RECEIVING:ksi, jos se ei vielä ole.
-            // Ilman if-lausetta tämä yrittäisi muuttaa tilaa jokaisella kierroksella.
-            if (current_state != RECEIVING)
+            else if (current_state == SUCCESS)
             {
-                if (xSemaphoreTake(stateMutex, 10) == pdTRUE)
+                    // Käydään läpi kuittausmelodian kaikki nuotit
+                for (int i = 0; i < len_kuittausmelodia; i++)
                 {
-                    programState = RECEIVING;
-                    current_state = RECEIVING;
+                    buzzer_play_tone(kuittausmelodia[i].frequency, kuittausmelodia[i].length - 20);
+                    vTaskDelay(pdMS_TO_TICKS(20));
+                }
+
+                // Muutetaan tila IDLE:ksi
+                if (xSemaphoreTake(stateMutex, portMAX_DELAY) == pdTRUE)
+                {
+                    programState = IDLE;
+                    current_state = IDLE; // Päivitetään paikallinen kopio
                     xSemaphoreGive(stateMutex);
                 }
-            }
 
-            // Lisätään merkki puskuriin ja lisätään nollatavu perään
-            msg_buffer[index] = character;
-            msg_buffer[index + 1] = '\0';
-
-            // Nostetaan indeksiä, mutta varmistetaan ettei tule ylivuotoa
-            if (index >= 62)
-                index = 0;
-            else
-                index++;
-
-            // Päivitetään näyttö
-            clear_display();
-            write_text_xy(0, 0, get_state_string(current_state));
-            write_text_xy(0, 16, msg_buffer);
+                // Päivitetään näyttö
+                clear_display();
+                write_text_xy(0, 0, get_state_string(current_state));
+                write_text_xy(0, 16, msg_buffer);
+            } 
+            previous_state = current_state;
         }
     }
 }
@@ -431,148 +377,150 @@ static void sensor_task(void *arg)
                 vTaskDelayUntil(&last_wake, pdMS_TO_TICKS(50));
             }
         }
+    }
+}
 
-        // Painikkeen keskeytyskäsittelijä.
-        void button_callback(uint gpio, uint32_t events)
+// Painikkeen keskeytyskäsittelijä.
+void button_callback(uint gpio, uint32_t events)
+{
+    programState = SENDING;
+}
+
+// Hoitaa USB-pinon.
+void usb_task(void *arg)
+{
+    (void)arg;
+    while (1)
+    {
+        tud_task();
+        // Ei vTaskDelay
+    }
+}
+
+// Lähettää viesti bufferin sisällön.
+void transmit_task(void *arg)
+{
+    (void)arg;
+
+    while (1)
+    {
+        xSemaphoreTake(stateMutex, portMAX_DELAY);
+        if (programState == SENDING)
         {
-            programState = SENDING;
+            tud_cdc_n_write(CDC_ITF_DATA, txBuffer, sizeof(char) * msgIndex);
+            tud_cdc_n_write_flush(CDC_ITF_DATA);
+            // Resetoi viestin indeksi seuraavaa viestiä varten
+            // msgIndex = 0;
+            programState = IDLE;
         }
+        xSemaphoreGive(stateMutex);
+        vTaskDelay(pdMS_TO_TICKS(50));
+    }
+}
 
-        // Hoitaa USB-pinon.
-        void usb_task(void *arg)
-        {
-            (void)arg;
-            while (1)
-            {
-                tud_task();
-                // Ei vTaskDelay
-            }
-        }
+// Vastaanottaa datan.
+void tud_cdc_rx_cb(uint8_t itf)
+{
 
-        // Lähettää viesti bufferin sisällön.
-        void transmit_task(void *arg)
-        {
-            (void)arg;
+    // Vastaan otetaan itf:stä riippumatta, jotta bufferit tyhjenee.
+    uint32_t count = tud_cdc_n_read(itf, rxBuffer, sizeof(rxBuffer));
 
-            while (1)
-            {
-                xSemaphoreTake(stateMutex, portMAX_DELAY);
-                if (programState == SENDING)
-                {
-                    tud_cdc_n_write(CDC_ITF_DATA, txBuffer, sizeof(char) * msgIndex);
-                    tud_cdc_n_write_flush(CDC_ITF_DATA);
-                    // Resetoi viestin indeksi seuraavaa viestiä varten
-                    // msgIndex = 0;
-                    programState = IDLE;
-                }
-                xSemaphoreGive(stateMutex);
-                vTaskDelay(pdMS_TO_TICKS(50));
-            }
-        }
+    // Käsitellään vain CDC_ITF_DATA-liitännän kautta tuleva data.
+    if (itf == CDC_ITF_DATA)
+    {
+        // Käsittele data täällä (esim. tallenna puskuriin tai lähetä toiselle tehtävälle).
 
-        // Vastaanottaa datan.
-        void tud_cdc_rx_cb(uint8_t itf)
-        {
+        // Vastataan kohteliaasti OK
+        tud_cdc_n_write(itf, (uint8_t const *)"OK\n", 3);
+        tud_cdc_n_write_flush(itf);
+    }
+}
 
-            // Vastaan otetaan itf:stä riippumatta, jotta bufferit tyhjenee.
-            uint32_t count = tud_cdc_n_read(itf, rxBuffer, sizeof(rxBuffer));
+int main()
+{
 
-            // Käsitellään vain CDC_ITF_DATA-liitännän kautta tuleva data.
-            if (itf == CDC_ITF_DATA)
-            {
-                // Käsittele data täällä (esim. tallenna puskuriin tai lähetä toiselle tehtävälle).
+    // Alustaa HAT-laitteen ja sen oletusarvoisen I2C-väylän.
+    init_hat_sdk();
+    sleep_ms(300);
 
-                // Vastataan kohteliaasti OK
-                tud_cdc_n_write(itf, (uint8_t const *)"OK\n", 3);
-                tud_cdc_n_write_flush(itf);
-            }
-        }
+    TaskHandle_t handleSensorTask = NULL;
 
-        int main()
-        {
+    // Alustaa painikkeen ja määrittää sen keskeytyskäsittelijän.
+    gpio_init(BUTTON1);
+    gpio_set_irq_enabled_with_callback(BUTTON1, GPIO_IRQ_EDGE_RISE, true, button_callback);
 
-            // Alustaa HAT-laitteen ja sen oletusarvoisen I2C-väylän.
-            init_hat_sdk();
-            sleep_ms(300);
+    // Alustetaan USB yhteys ennen debug viestejä
+    tusb_init();
+    usb_serial_init();
 
-            TaskHandle_t handleSensorTask = NULL;
+    // Mutex estää samanaikaiset ristiriitaiset programState-muutokset.
+    stateMutex = xSemaphoreCreateMutex();
 
-            // Alustaa painikkeen ja määrittää sen keskeytyskäsittelijän.
-            gpio_init(BUTTON1);
-            gpio_set_irq_enabled_with_callback(BUTTON1, GPIO_IRQ_EDGE_RISE, true, button_callback);
+    if (stateMutex == NULL)
+    {
+        usb_serial_print((char const *)"Failed to create mutex\n\0");
+        usb_serial_flush();
+        return 0;
+    }
 
-            // Alustetaan USB yhteys ennen debug viestejä
-            tusb_init();
-            usb_serial_init();
+    // Varataan jonot tulevia viestinvälitystehtäviä varten.
+    txQueue = xQueueCreate(64, sizeof(char));
+    rxQueue = xQueueCreate(64, sizeof(char));
 
-            // Mutex estää samanaikaiset ristiriitaiset programState-muutokset.
-            stateMutex = xSemaphoreCreateMutex();
+    if (txQueue == NULL || rxQueue == NULL)
+    {
+        printf("Failed to create queues\n");
+        return 0;
+    }
 
-            if (stateMutex == NULL)
-            {
-                usb_serial_print((char const *)"Failed to create mutex\n\0");
-                usb_serial_flush();
-                return 0;
-            }
+    // Sensoritehtävä lukee IMU:ta ja tunnistaa liikkeet. Prioriteetti 2
+    // määrittää tehtävän ajamisen suhteessa muihin FreeRTOS-tehtäviin.
+    BaseType_t sensorTaskResult = xTaskCreate(
+        sensor_task,
+        "sensor",
+        DEFAULT_STACK_SIZE,
+        NULL,
+        2,
+        &handleSensorTask);
 
-            // Varataan jonot tulevia viestinvälitystehtäviä varten.
-            txQueue = xQueueCreate(64, sizeof(char));
-            rxQueue = xQueueCreate(64, sizeof(char));
+    if (sensorTaskResult != pdPASS)
+    {
+        usb_serial_print((char const *)"Sensor task creation failed\n\0");
+        usb_serial_flush();
+        return 0;
+    }
 
-            if (txQueue == NULL || rxQueue == NULL)
-            {
-                printf("Failed to create queues\n");
-                return 0;
-            }
+    BaseType_t usbTaskResult = xTaskCreate(
+        usb_task,
+        "usb",
+        DEFAULT_STACK_SIZE,
+        NULL,
+        3, // Suurempi prioriteetti kuin muilla tehtävillä
+        NULL);
+    if (usbTaskResult != pdPASS)
+    {
+        usb_serial_print((char const *)"USB task creation failed\n\0");
+        usb_serial_flush();
+        return 0;
+    }
 
-            // Sensoritehtävä lukee IMU:ta ja tunnistaa liikkeet. Prioriteetti 2
-            // määrittää tehtävän ajamisen suhteessa muihin FreeRTOS-tehtäviin.
-            BaseType_t sensorTaskResult = xTaskCreate(
-                sensor_task,
-                "sensor",
-                DEFAULT_STACK_SIZE,
-                NULL,
-                2,
-                &handleSensorTask);
+    BaseType_t transmitTaskResult = xTaskCreate(
+        transmit_task,
+        "transmit",
+        DEFAULT_STACK_SIZE,
+        NULL,
+        2,
+        NULL);
+    if (transmitTaskResult != pdPASS)
+    {
+        usb_serial_print((char const *)"Transmit task creation failed\n\0");
+        usb_serial_flush();
+        return 0;
+    }
 
-            if (sensorTaskResult != pdPASS)
-            {
-                usb_serial_print((char const *)"Sensor task creation failed\n\0");
-                usb_serial_flush();
-                return 0;
-            }
+    // Käynnistyksen jälkeen FreeRTOS Scheduler hallitsee tehtävien ajoitusta.
+    vTaskStartScheduler();
 
-            BaseType_t usbTaskResult = xTaskCreate(
-                usb_task,
-                "usb",
-                DEFAULT_STACK_SIZE,
-                NULL,
-                3, // Suurempi prioriteetti kuin muilla tehtävillä
-                NULL);
-            if (usbTaskResult != pdPASS)
-            {
-                usb_serial_print((char const *)"USB task creation failed\n\0");
-                usb_serial_flush();
-                return 0;
-            }
-
-            BaseType_t transmitTaskResult = xTaskCreate(
-                transmit_task,
-                "transmit",
-                DEFAULT_STACK_SIZE,
-                NULL,
-                2,
-                NULL);
-            if (transmitTaskResult != pdPASS)
-            {
-                usb_serial_print((char const *)"Transmit task creation failed\n\0");
-                usb_serial_flush();
-                return 0;
-            }
-
-            // Käynnistyksen jälkeen FreeRTOS Scheduler hallitsee tehtävien ajoitusta.
-            vTaskStartScheduler();
-
-            // Schedulerin ei normaalisti pitäisi palata tähän.
-            return 0;
-        }
+    // Schedulerin ei normaalisti pitäisi palata tähän.
+    return 0;
+}
