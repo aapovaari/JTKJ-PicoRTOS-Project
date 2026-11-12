@@ -38,6 +38,20 @@ char rxBuffer[MAX_MSG_LENGTH];
 
 char txBuffer[MAX_MSG_LENGTH] = "Testi Viesti\n\0";
 int msgIndex = 14;
+typedef struct {
+    uint32_t frequency;
+    uint32_t length; // millisekuntia
+} Note;
+
+// Super Mario 1-Up -ääni
+const Note kuittausmelodia[] = {
+    {659, 133},  // E5
+    {784, 133},  // G5
+    {1319, 133}, // E6
+    {1046, 133}, // C6
+    {1175, 133}, // D6
+    {1568, 133}  // G6
+};
 
 // Nämä jonot varataan tulevaa lähetystä ja vastaanottoa varten.
 QueueHandle_t txQueue;
@@ -46,7 +60,156 @@ QueueHandle_t rxQueue;
 // Suojaa programState-muuttujan samanaikaisen käytön FreeRTOS-tehtävissä.
 SemaphoreHandle_t stateMutex;
 
-static void sensor_task(void *arg) {
+// Funktio, jolla saadaan tämänhetkinen tila merkkijonona.
+const char* get_state_string(enum state s) {
+    switch (s) {
+        case IDLE:       return "IDLE";
+        case SENDING:    return "SENDING";
+        case RECEIVING:  return "RECEIVING";
+        case PLAY_BACK:  return "PLAYBACK";
+    }
+    return "UNKNOWN";
+}
+
+void ui_task(void *pvParameters) {
+    char character;
+    char msg_buffer[64];    
+    uint8_t index = 0;
+
+    int len_kuittausmelodia = sizeof(kuittausmelodia) / sizeof(kuittausmelodia[0]);
+
+    // Oma muuttuja tilan tallentamiseen turvallisesti
+    enum state current_state = IDLE;
+
+    // Alustetaan näyttö, summeri ja ledi sekä tyhjennetään viestipuskuri roskadatasta
+    init_display();
+    init_buzzer();
+    init_led();
+    msg_buffer[0] = '\0';
+
+    while (1) {
+        xQueueReceive(rxQueue, &character, portMAX_DELAY);
+
+        // Lukitaan tila kymmenen tikin ajaksi, kun luetaan tila. 
+        // Jos epäonnistuu, current_state pysyy samana kuin aikaisemmin.
+        if (xSemaphoreTake(stateMutex, 10) == pdTRUE) {
+            current_state = programState;
+            xSemaphoreGive(stateMutex);
+        }
+        
+        // Lähetetään summerilla melodia, kun jonoon saapuu oman lähetyksen lopetusmerkki
+        if (character == 0x04) {
+            // Käydään läpi kuittausmelodian kaikki nuotit
+            for (int i = 0; i < len_kuittausmelodia; i++) {
+                buzzer_play_tone(kuittausmelodia[i].frequency, kuittausmelodia[i].length - 20);
+                vTaskDelay(pdMS_TO_TICKS(20));
+            }
+
+            // Muutetaan tila IDLE:ksi
+            if (xSemaphoreTake(stateMutex, portMAX_DELAY) == pdTRUE) {
+                programState = IDLE;
+                current_state = IDLE; // Päivitetään paikallinen kopio
+                xSemaphoreGive(stateMutex);
+            }
+
+            // Päivitetään näyttö
+            clear_display();
+            write_text_xy(0, 0, get_state_string(current_state));
+            write_text_xy(0, 16, msg_buffer);
+        }
+        
+        // Lopetusmerkki
+        else if (character == '\n') {
+            // Muutetaan tila PLAY_BACK:ksi toiston ajaksi
+            if (xSemaphoreTake(stateMutex, 10) == pdTRUE) {
+                programState = PLAY_BACK;
+                current_state = PLAY_BACK;
+                xSemaphoreGive(stateMutex);
+            }
+            
+            // Lisätään * viestin päättymisen merkiksi, jos puskurissa on tilaa
+            if (index < 62) {
+                msg_buffer[index] = '*';
+                msg_buffer[index + 1] = '\0';
+            }
+            
+            // Päivitetään näyttö
+            clear_display();
+            write_text_xy(0, 0, get_state_string(current_state));
+            write_text_xy(0, 16, msg_buffer);
+
+            // Toistetaan vastaanotettu viesti ledillä ja summerilla.
+            for (int i = 0; i < index; i++) {
+                char c = msg_buffer[i];
+                
+                // Piste
+                if (c == '.') {
+                    set_led_status(true);
+                    buzzer_play_tone(641, 100);
+                    set_led_status(false);
+                    vTaskDelay(pdMS_TO_TICKS(100));
+                }
+
+                // Viiva
+                else if (c == '-') {
+                    set_led_status(true);
+                    buzzer_play_tone(641, 300);
+                    set_led_status(false);
+                    vTaskDelay(pdMS_TO_TICKS(100));
+                }
+
+                // Välilyönti
+                else if (c == ' ') {
+                    vTaskDelay(pdMS_TO_TICKS(300));
+                }
+            }
+            
+            // Muutetaan tila takaisin IDLE:ksi
+            if (xSemaphoreTake(stateMutex, portMAX_DELAY) == pdTRUE) {
+                programState = IDLE;
+                current_state = IDLE;
+                xSemaphoreGive(stateMutex);
+            }
+
+            // Päivitetään näyttö, mutta jätetään vanha viesti näkyviin
+            clear_display();
+            write_text_xy(0, 0, get_state_string(current_state));
+            write_text_xy(0, 16, msg_buffer);
+            
+            // Nollataan puskuri ja indeksi
+            msg_buffer[0] = '\0';
+            index = 0;
+        }
+
+        else {
+            // Muutetaan tila RECEIVING:ksi, jos se ei vielä ole.
+            // Ilman if-lausetta tämä yrittäisi muuttaa tilaa jokaisella kierroksella.
+            if (current_state != RECEIVING) {
+                if (xSemaphoreTake(stateMutex, 10) == pdTRUE) {
+                    programState = RECEIVING;
+                    current_state = RECEIVING;
+                    xSemaphoreGive(stateMutex);
+                }
+            }
+            
+            // Lisätään merkki puskuriin ja lisätään nollatavu perään
+            msg_buffer[index] = character;
+            msg_buffer[index + 1] = '\0';
+
+            // Nostetaan indeksiä, mutta varmistetaan ettei tule ylivuotoa
+            if (index >= 62) index = 0;
+            else index++;
+            
+            // Päivitetään näyttö
+            clear_display();
+            write_text_xy(0, 0, get_state_string(current_state));
+            write_text_xy(0, 16, msg_buffer);
+        }
+    }
+}
+
+static void sensor_task(void *arg)
+{
     (void)arg;
 
     // Alustetaan IMU ja otetaan kiihtyvyysanturi sekä gyroskooppi käyttöön.
@@ -127,6 +290,14 @@ static void sensor_task(void *arg) {
             // Tunnistetaan pyöräytys ennen pisteen tai viivan tunnistamista.
             if (rotation_speed > gyroscope_threshold) {
                 rotation_counter++;
+            if (!is_moving)
+            {
+                // Liikkeen alkaessa muodostetaan yksi character ja asetetaan
+                // tila aktiiviseksi, jotta samaa liikettä ei tunnisteta uudelleen.
+                if (delta_ay > threshold)
+                {
+                    is_moving = true;
+                    detection_symbol = '.';
 
                 if (rotation_counter >= 3) {
                     programState = SENDING;
